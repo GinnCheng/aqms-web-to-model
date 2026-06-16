@@ -77,48 +77,36 @@ def normalize_list_column(v):
     return [str(v).strip()]
 
 
-def get_all_csv_columns(df: pd.DataFrame) -> list[str]:
-    cols = set()
-    if "csv_columns" not in df.columns:
-        return []
+POLLUTANT_COLS = ["co", "no2", "pm2_5", "pm10", "tsp", "o3", "so2", "wd", "ws"]
 
-    for item in df["csv_columns"]:
-        if isinstance(item, list):
-            cols.update(item)
-    return sorted(cols)
-
-
-def match_columns(selected_cols, row_cols, match_mode="any"):
-    """
-    selected_cols: list[str]
-    row_cols: list[str]
-    """
-    if not selected_cols:
-        return True
-
-    row_set = set(row_cols)
-    sel_set = set(selected_cols)
-
-    if match_mode == "all":
-        return sel_set.issubset(row_set)
-    return len(sel_set.intersection(row_set)) > 0
 
 
 def filter_dataframe(
     df: pd.DataFrame,
     years: list[int],
-    selected_columns: list[str],
+    selected_pollutants: list[str],
     search_text: str,
     match_mode: str = "any",
 ) -> pd.DataFrame:
     out = df.copy()
 
+    # Year filter
     if "dataset_year" in out.columns and years:
         out = out[out["dataset_year"].isin(years)]
 
-    if selected_columns:
-        out = out[out["csv_columns"].apply(lambda x: match_columns(selected_columns, x, match_mode))]
+    # Pollutant boolean filter
+    if selected_pollutants:
+        # Make sure missing cols are treated as False
+        for col in selected_pollutants:
+            if col not in out.columns:
+                out[col] = False
 
+        if match_mode == "all":
+            out = out[out[selected_pollutants].all(axis=1)]
+        else:
+            out = out[out[selected_pollutants].any(axis=1)]
+
+    # Search filter
     if search_text:
         q = search_text.strip().lower()
 
@@ -238,7 +226,7 @@ if missing:
 
 # Available filter values
 all_years = sorted([int(y) for y in df["dataset_year"].dropna().unique()])
-all_columns = get_all_csv_columns(df)
+POLLUTANT_COLS = ["co", "no2", "pm2_5", "pm10", "tsp", "o3", "so2", "wd", "ws"]
 
 # Sidebar filters
 with st.sidebar:
@@ -250,9 +238,9 @@ with st.sidebar:
         default=all_years,
     )
 
-    selected_csv_columns = st.multiselect(
-        "CSV columns / pollutants",
-        options=all_columns,
+    selected_pollutants = st.multiselect(
+        "Pollutants / fields",
+        options=POLLUTANT_COLS,
         default=[],
     )
 
@@ -272,11 +260,11 @@ with st.sidebar:
 
     st.divider()
 
-    st.write("### Selected columns")
-    if selected_csv_columns:
-        st.write(", ".join(selected_csv_columns))
+    st.write("### Selected pollutants")
+    if selected_pollutants:
+        st.write(", ".join(selected_pollutants))
     else:
-        st.write("All columns")
+        st.write("All pollutants")
 
     st.write("### Selected years")
     if selected_years:
@@ -288,7 +276,7 @@ with st.sidebar:
 filtered_df = filter_dataframe(
     df=df,
     years=selected_years,
-    selected_columns=selected_csv_columns,
+    selected_pollutants=selected_pollutants,
     search_text=search_text,
     match_mode=match_mode,
 )
@@ -303,7 +291,7 @@ c1, c2, c3, c4 = st.columns(4)
 c1.metric("Matched rows", len(filtered_df))
 c2.metric("Stations on map", len(map_df))
 c3.metric("Years selected", len(selected_years))
-c4.metric("Selected CSV columns", len(selected_csv_columns))
+c4.metric("Selected CSV columns", len(selected_pollutants))
 
 st.divider()
 
