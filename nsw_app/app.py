@@ -86,7 +86,7 @@ for _, row in df_map.iterrows():
         tooltip=row["SiteName"]
     ).add_to(cluster)
 
-map_state = st_folium(m, height=600)
+map_state = st_folium(m, height=600, use_container_width=True)
 
 # ============================================================
 # Detect click
