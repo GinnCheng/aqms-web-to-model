@@ -1,9 +1,16 @@
-import pandas as pd
 import streamlit as st
 import folium
-import requests
 from streamlit_folium import st_folium
 from folium.plugins import MarkerCluster
+import pandas as pd
+
+from utils import (
+    load_data,
+    filter_df,
+    get_map_df,
+    find_nearest_station,
+    fetch_api_data
+)
 
 # ============================================================
 # Config
@@ -12,77 +19,16 @@ from folium.plugins import MarkerCluster
 st.set_page_config(page_title="NSW AQMS Explorer", layout="wide")
 
 PARQUET_PATH = "nsw_aqms_full.parquet"
-API_URL = "https://data.airquality.nsw.gov.au/api/Data/get_Observations"
-
 
 # ============================================================
 # Load
 # ============================================================
 
 @st.cache_data
-def load_data(path):
-    df = pd.read_parquet(path)
+def load():
+    return load_data(PARQUET_PATH)
 
-    # clean column names
-    df.columns = (
-        df.columns
-        .str.strip()
-        .str.replace('\n', ' ')
-        .str.replace('\xa0', '')
-    )
-
-    # coordinates
-    df["Latitude"] = pd.to_numeric(df["Latitude_api"], errors="coerce")
-    df["Longitude"] = pd.to_numeric(df["Longitude_api"], errors="coerce")
-
-    # time fields
-    df["Commissioned"] = pd.to_numeric(df["Commissioned"], errors="coerce")
-    df["Decommissioned"] = pd.to_numeric(df["Decommissioned"], errors="coerce")
-
-    df["is_active"] = df["Decommissioned"].isna()
-
-    return df
-
-
-df = load_data(PARQUET_PATH)
-
-
-# ============================================================
-# Helpers
-# ============================================================
-
-def is_active_in_years(row, years):
-    if not years:
-        return True
-
-    start = row["Commissioned"]
-    end = row["Decommissioned"]
-
-    for y in years:
-        if pd.notna(start) and start <= y:
-            if pd.isna(end) or end >= y:
-                return True
-    return False
-
-
-def fetch_api_data(site_id, param, start, end):
-    payload = {
-        "Parameters": [param],
-        "Sites": [int(site_id)],
-        "StartDate": str(start),
-        "EndDate": str(end),
-        "Categories": ["Averages"],
-        "SubCategories": ["Hourly"],
-        "Frequency": ["Hourly average"]
-    }
-
-    r = requests.post(API_URL, json=payload)
-
-    if r.status_code != 200:
-        return None
-
-    return pd.json_normalize(r.json())
-
+df = load()
 
 # ============================================================
 # Sidebar
@@ -99,46 +45,23 @@ with st.sidebar:
     st.header("Filters")
 
     selected_years = st.multiselect("Year", years_available)
-
     selected_pollutants = st.multiselect("Pollutants", POLLUTANTS)
-
     match_mode = st.radio("Match mode", ["any", "all"], horizontal=True)
-
     search = st.text_input("Search station")
-
 
 # ============================================================
 # Filtering
 # ============================================================
 
-df_filtered = df.copy()
+df_filtered = filter_df(
+    df,
+    selected_years,
+    selected_pollutants,
+    match_mode,
+    search
+)
 
-# year filter
-if selected_years:
-    df_filtered = df_filtered[
-        df_filtered.apply(lambda r: is_active_in_years(r, selected_years), axis=1)
-    ]
-
-# pollutant filter
-if selected_pollutants:
-    if match_mode == "all":
-        df_filtered = df_filtered[df_filtered[selected_pollutants].all(axis=1)]
-    else:
-        df_filtered = df_filtered[df_filtered[selected_pollutants].any(axis=1)]
-
-# search
-if search:
-    df_filtered = df_filtered[df_filtered["SiteName"].str.contains(search, case=False, na=False)]
-
-# clean coords
-df_filtered = df_filtered[
-    df_filtered["Latitude"].notna() &
-    df_filtered["Longitude"].notna()
-]
-
-# ✅ fix marker duplication
-df_map = df_filtered.drop_duplicates(subset=["Site_Id"])
-
+df_map = get_map_df(df_filtered)
 
 # ============================================================
 # Map
@@ -151,78 +74,95 @@ cluster = MarkerCluster().add_to(m)
 
 for _, row in df_map.iterrows():
 
-    # query param link
-    download_url = f"?site_id={row['Site_Id']}&site={row['SiteName']}"
-
-    params = ", ".join(row["Parameters"]) if isinstance(row["Parameters"], list) else ""
-
     popup_html = f"""
     <b>{row['SiteName']}</b><br>
     Region: {row['Region']}<br>
-    Site_Id: {row['Site_Id']}<br>
-    Parameters: {params}<br><br>
-
-    <a href="{download_url}">
-        <button style="
-            background-color:#2563eb;
-            color:white;
-            border:none;
-            padding:6px 10px;
-            border-radius:6px;
-            cursor:pointer;
-        ">
-            Download Data
-        </button>
-    </a>
+    Site_Id: {row['Site_Id']}
     """
 
     folium.Marker(
         [row["Latitude"], row["Longitude"]],
-        popup=folium.Popup(popup_html, max_width=300),
+        popup=popup_html,
         tooltip=row["SiteName"]
     ).add_to(cluster)
 
-st_folium(m, height=600)
-
+map_state = st_folium(m, height=600)
 
 # ============================================================
-# Handle map click download
+# Detect click
 # ============================================================
 
-params_query = st.query_params
+if "selected_site_id" not in st.session_state:
+    st.session_state.selected_site_id = None
 
-if "site_id" in params_query:
-    st.subheader("Download station data (from map click)")
+if map_state and map_state.get("last_clicked"):
 
-    site_id = int(params_query["site_id"])
-    site_name = params_query.get("site", "Unknown")
+    lat = map_state["last_clicked"]["lat"]
+    lon = map_state["last_clicked"]["lng"]
 
-    st.write(f"Selected station: **{site_name}** (ID: {site_id})")
+    nearest = find_nearest_station(df_map, lat, lon)
 
-    param = st.selectbox(
-        "Parameter",
-        ["NO2", "OZONE", "PM10", "PM2.5"],
-        key="map_param"
-    )
+    if nearest:
+        st.session_state.selected_site_id = nearest
 
-    start_date = st.date_input("Start date", key="map_start")
-    end_date = st.date_input("End date", key="map_end")
+# ============================================================
+# Download panel
+# ============================================================
 
-    if st.button("Download data", key="map_download"):
+st.subheader("Download station data")
 
-        df_api = fetch_api_data(site_id, param, start_date, end_date)
+# default selection
+default_idx = 0
 
-        if df_api is None or df_api.empty:
-            st.error("No data returned.")
-        else:
-            csv = df_api.to_csv(index=False).encode("utf-8")
+if st.session_state.selected_site_id:
+    match = df_filtered[df_filtered["Site_Id"] == st.session_state.selected_site_id]
+    if not match.empty:
+        default_idx = df_filtered.index.get_loc(match.index[0])
 
-            st.download_button(
-                "Download CSV",
-                csv,
-                file_name=f"{site_name}_{param}.csv"
-            )
+selected_station = st.selectbox(
+    "Select station",
+    df_filtered["SiteName"].tolist(),
+    index=default_idx
+)
 
+row_sel = df_filtered[df_filtered["SiteName"] == selected_station].iloc[0]
+
+site_id = row_sel["Site_Id"]
+
+# ✅ dynamic param options
+available_params = []
+
+if row_sel["no2"]:
+    available_params.append("NO2")
+if row_sel["o3"]:
+    available_params.append("OZONE")
+if row_sel["pm10"]:
+    available_params.append("PM10")
+if row_sel["pm2_5"]:
+    available_params.append("PM2.5")
+
+param = st.selectbox("Parameter", available_params)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    start_date = st.date_input("Start date")
+
+with col2:
+    end_date = st.date_input("End date")
+
+if st.button("Download data"):
+
+    df_api = fetch_api_data(site_id, param, start_date, end_date)
+
+    if df_api is None or df_api.empty:
+        st.error("No data returned.")
+    else:
+        st.download_button(
+            "Download CSV",
+            df_api.to_csv(index=False).encode("utf-8"),
+            file_name=f"{selected_station}_{param}.csv"
+        )
 
 # ============================================================
 # Table
@@ -244,7 +184,6 @@ show_cols = [
     'Web link to station meta data page'
 ]
 
-# safe filtering
 show_cols = [c for c in show_cols if c in df_filtered.columns]
 
 st.dataframe(
