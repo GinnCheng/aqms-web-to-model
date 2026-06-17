@@ -116,6 +116,85 @@ class aqms_api_class():
 
         return df_full
 
+    def get_station_running_years(self,
+                                  start_year=1994,
+                                  end_year=2025,
+                                  parameters=['NO2', 'PM10']):
+        """
+        Get approximate operating period (min/max date) for each station.
+
+        Returns:
+            DataFrame with:
+            - Site_Id
+            - start_date
+            - end_date
+        """
+
+        # --- 1. Get site list ---
+        sites = self.get_site_details().json()
+        df_sites = pd.DataFrame(sites)
+        site_ids = df_sites['Site_Id'].tolist()
+
+        site_chunks = list(chunk_list(site_ids, 10))
+
+        all_ranges = []
+
+        for sc in site_chunks:
+
+            req = {
+                'Parameters': parameters,  # ✅ minimal set for speed
+                'Sites': sc,
+                'StartDate': f"{start_year}-01-01",
+                'EndDate': f"{end_year}-01-01",
+                'Categories': ['Averages'],
+                'SubCategories': ['Hourly'],
+                'Frequency': ['Hourly average']
+            }
+
+            try:
+                data = self.get_Obs(req).json()
+
+                if not data:
+                    continue
+
+                df = pd.json_normalize(data)
+
+                # --- compute range ---
+                df_range = (
+                    df.groupby('Site_Id')['Date']
+                    .agg(['min', 'max'])
+                    .reset_index()
+                    .rename(columns={
+                        'min': 'start_date',
+                        'max': 'end_date'
+                    })
+                )
+
+                all_ranges.append(df_range)
+
+            except requests.HTTPError as e:
+                self.logger.warning(f"Failed chunk {sc}: {e}")
+
+        # --- 2. Combine results ---
+        if len(all_ranges) == 0:
+            self.logger.warning("No running year data retrieved.")
+            return pd.DataFrame(columns=['Site_Id', 'start_date', 'end_date'])
+
+        df_years = pd.concat(all_ranges, ignore_index=True)
+
+        # --- 3. deduplicate (important if overlapping chunks)
+        df_years = (
+            df_years
+            .groupby('Site_Id')
+            .agg({
+                'start_date': 'min',
+                'end_date': 'max'
+            })
+            .reset_index()
+        )
+
+        return df_years
+
 
 if __name__ == '__main__':
     AQMS = aqms_api_class()
