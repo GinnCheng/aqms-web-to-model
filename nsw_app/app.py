@@ -59,6 +59,15 @@ df_filtered = filter_df(
     search
 )
 
+if df_filtered.empty:
+    st.warning("No stations match the current filters. Please adjust your filters.")
+
+    # ✅ still show empty table for clarity
+    st.subheader("Stations")
+    st.dataframe(df_filtered)
+
+    st.stop()   # 🔥 CRITICAL: stop rest of app
+
 # ✅ FIXED map dataframe
 df_map = (
     df_filtered
