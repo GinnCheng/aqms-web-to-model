@@ -7,7 +7,6 @@ import pandas as pd
 from utils import (
     load_data,
     filter_df,
-    get_map_df,
     find_nearest_station,
     fetch_api_data
 )
@@ -34,12 +33,11 @@ df = load()
 # Sidebar
 # ============================================================
 
-POLLUTANTS = ['no2', 'o3', 'pm10', 'pm2_5', 'co', 'ws', 'wd']
+# ✅ FIXED comma
+POLLUTANTS = ['ws','wd','no2','pm10_day','pm2_5_day','co','o3','pm10','pm2_5']
 
-years_available = sorted(
-    set(df['Commissioned'].dropna().astype(int).tolist() +
-        df['Decommissioned'].dropna().astype(int).tolist())
-)
+years_available = list(range(2020, pd.Timestamp.now().year + 1))
+years_available.reverse()
 
 with st.sidebar:
     st.header("Filters")
@@ -61,7 +59,13 @@ df_filtered = filter_df(
     search
 )
 
-df_map = get_map_df(df_filtered)
+# ✅ FIXED map dataframe
+df_map = (
+    df_filtered
+    .drop_duplicates(subset=["Site_Id"])
+    .dropna(subset=["Latitude", "Longitude"])
+    .reset_index(drop=True)
+)
 
 # ============================================================
 # Map
@@ -69,41 +73,44 @@ df_map = get_map_df(df_filtered)
 
 st.subheader("Map")
 
-m = folium.Map(location=[-33.5, 147.5], zoom_start=6)
+if not df_map.empty:
+    center = [df_map["Latitude"].mean(), df_map["Longitude"].mean()]
+else:
+    center = [-33.5, 147.5]
+
+m = folium.Map(location=center, zoom_start=6)
 cluster = MarkerCluster().add_to(m)
 
+# ✅ CLEAN popup (no JS)
 for _, row in df_map.iterrows():
 
-    popup_html = f"""
-    <b>{row['SiteName']}</b><br>
-    Region: {row['Region']}<br>
-    Site_Id: {row['Site_Id']}
-    """
-
     folium.Marker(
-        [row["Latitude"], row["Longitude"]],
-        popup=popup_html,
-        tooltip=row["SiteName"]
+        location=[row["Latitude"], row["Longitude"]],
+        tooltip=row["SiteName"],
+        popup=f"{row['SiteName']} (ID {int(row['Site_Id'])})"
     ).add_to(cluster)
 
-map_state = st_folium(m, height=600, use_container_width=True)
+map_state = st_folium(m, height=500, use_container_width=True)
 
 # ============================================================
-# Detect click
+# Detect click (WORKING)
 # ============================================================
-
 if "selected_site_id" not in st.session_state:
     st.session_state.selected_site_id = None
 
-if map_state and map_state.get("last_clicked"):
+if map_state and map_state.get("last_object_clicked_tooltip"):
 
-    lat = map_state["last_clicked"]["lat"]
-    lon = map_state["last_clicked"]["lng"]
+    tooltip = map_state["last_object_clicked_tooltip"]
 
-    nearest = find_nearest_station(df_map, lat, lon)
+    # tooltip format: "SiteName"
+    match = df_map[df_map["SiteName"] == tooltip]
 
-    if nearest:
-        st.session_state.selected_site_id = nearest
+    if not match.empty:
+        site_id = int(match.iloc[0]["Site_Id"])
+
+        if st.session_state.selected_site_id != site_id:
+            st.session_state.selected_site_id = site_id
+            st.rerun()
 
 # ============================================================
 # Download panel
@@ -111,35 +118,60 @@ if map_state and map_state.get("last_clicked"):
 
 st.subheader("Download station data")
 
-# default selection
-default_idx = 0
+df_ui = df_filtered.reset_index(drop=True)
 
-if st.session_state.selected_site_id:
-    match = df_filtered[df_filtered["Site_Id"] == st.session_state.selected_site_id]
-    if not match.empty:
-        default_idx = df_filtered.index.get_loc(match.index[0])
+# ✅ mapping
+station_dict = {
+    int(r["Site_Id"]): r["SiteName"]
+    for _, r in df_ui.iterrows()
+}
 
-selected_station = st.selectbox(
+site_ids = list(station_dict.keys())
+
+# ✅ initialise safely
+if "selected_site_id" not in st.session_state:
+    st.session_state.selected_site_id = site_ids[0] if site_ids else None
+
+# ✅ FIX: if selected station not in filtered → reset
+if st.session_state.selected_site_id not in site_ids:
+    st.session_state.selected_site_id = site_ids[0] if site_ids else None
+
+# ✅ controlled selectbox
+selected_site_id = st.selectbox(
     "Select station",
-    df_filtered["SiteName"].tolist(),
-    index=default_idx
+    site_ids,
+    format_func=lambda x: f"{station_dict[x]} (ID {x})",
+    key="selected_site_id"
 )
 
-row_sel = df_filtered[df_filtered["SiteName"] == selected_station].iloc[0]
+# ✅ SAFE row selection
+match = df_ui[df_ui["Site_Id"] == selected_site_id]
 
-site_id = row_sel["Site_Id"]
+if match.empty:
+    st.warning("Selected station not in current filter. Showing first available.")
+    row_sel = df_ui.iloc[0]
+    selected_site_id = row_sel["Site_Id"]
+    st.session_state.selected_site_id = selected_site_id
+else:
+    row_sel = match.iloc[0]
 
-# ✅ dynamic param options
-available_params = []
+# ✅ FULL params
+param_map = {
+    "ws": "Wind Speed",
+    "wd": "Wind Direction",
+    "no2": "NO2",
+    "o3": "OZONE",
+    "pm10": "PM10",
+    "pm2_5": "PM2.5",
+    "pm10_day": "PM10d",
+    "pm2_5_day": "PM2.5d",
+    "co": "CO"
+}
 
-if row_sel["no2"]:
-    available_params.append("NO2")
-if row_sel["o3"]:
-    available_params.append("OZONE")
-if row_sel["pm10"]:
-    available_params.append("PM10")
-if row_sel["pm2_5"]:
-    available_params.append("PM2.5")
+available_params = [
+    api for col, api in param_map.items()
+    if col in row_sel and bool(row_sel[col])
+]
 
 param = st.selectbox("Parameter", available_params)
 
@@ -153,7 +185,7 @@ with col2:
 
 if st.button("Download data"):
 
-    df_api = fetch_api_data(site_id, param, start_date, end_date)
+    df_api = fetch_api_data(selected_site_id, param, start_date, end_date)
 
     if df_api is None or df_api.empty:
         st.error("No data returned.")
@@ -161,7 +193,7 @@ if st.button("Download data"):
         st.download_button(
             "Download CSV",
             df_api.to_csv(index=False).encode("utf-8"),
-            file_name=f"{selected_station}_{param}.csv"
+            file_name=f"{station_dict[selected_site_id]}_{param}.csv"
         )
 
 # ============================================================
@@ -171,16 +203,9 @@ if st.button("Download data"):
 st.subheader("Stations")
 
 show_cols = [
-    'SiteName',
-    'Site_Id',
-    'Region',
-    'Latitude',
-    'Longitude',
-    'Commissioned',
-    'Decommissioned',
-    'Station purpose',
-    'Site address',
-    'Altitude (ahd)',
+    'SiteName','Site_Id','Region','Latitude','Longitude',
+    'Commissioned','Decommissioned',
+    'Station purpose','Site address','Altitude (ahd)',
     'Web link to station meta data page'
 ]
 
