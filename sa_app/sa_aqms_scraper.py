@@ -1,9 +1,7 @@
 import requests
 import pandas as pd
 
-class sa_aqms_manager(
-
-):
+class sa_aqms_manager:
     def __init__(self):
         self.base = "https://data.sa.gov.au/data/api/3/action/package_search"
         self.params = {
